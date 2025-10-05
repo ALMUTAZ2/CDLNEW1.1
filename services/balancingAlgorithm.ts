@@ -112,7 +112,7 @@ const calculateMultiTransformerSummary = (transformers: Transformer[], totalLoad
 // Phase 1: Planning
 const planTransformersForLoad = (load: number): TransformerType[] => {
     const plannedTypes: TransformerType[] = [];
-    let remainingLoad = load * 1.15; // Add a 15% planning safety margin to prevent 99% usage
+    let remainingLoad = load * 1.00001; // Add a 15% planning safety margin to prevent 99% usage
     
     const sortedTypes = [...TRANSFORMER_TYPES].sort((a, b) => b.safeLoad - a.safeLoad);
     const largestType = sortedTypes[0];
