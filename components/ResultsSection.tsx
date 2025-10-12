@@ -29,12 +29,6 @@ type RowWithSpanInfo = DisplayRow & {
     rowSpan: number;
 };
 
-// A union type for what can be displayed in the panel view
-type PanelSlot = 
-    | { type: 'active'; data: Breaker }
-    | { type: 'merged'; data: MergedBreakerData }
-    | { type: 'empty'; number: number };
-
 type MergedBreakerData = {
     id: string;
     number: string;
@@ -44,7 +38,13 @@ type MergedBreakerData = {
     categories: Set<string>;
     meterTypes: Set<string>;
     timePatterns: Set<string>;
+    isMerged: true; // Added for reliable type guarding
 };
+
+// A union type for what can be displayed in the panel view
+type BreakerSlot =
+    | { type: 'active'; data: Breaker }
+    | { type: 'merged'; data: MergedBreakerData };
 
 
 /**
@@ -53,29 +53,30 @@ type MergedBreakerData = {
  */
 const useDisplayData = (transformers: Transformer[]): DisplayRow[] => {
     return useMemo(() => {
-        // FIX: Replaced `any[]` with a specific type for better type safety, which resolves the comparison error.
-        type ProcessedRow = {
+        // A type for the intermediate processing before final formatting
+        type ProcessedRowData = {
             id: string | number;
             isMerged: boolean;
             transformer: Transformer;
             tIndex: number;
             number: string | number;
-            categories: Set<string> | string[];
+            categories: Set<string>;
             meters: IndividualMeter[];
             load: number;
             utilizationPercent: number;
         };
 
-        const processedRows: ProcessedRow[] = [];
+        const processedRows: ProcessedRowData[] = [];
+        const handledBreakers = new Set<string>(); // Key: "t{t.id}-b{b.id}"
 
-        const allBreakersWithTransformer = transformers.flatMap((transformer, tIndex) => 
-            transformer.breakers.map(breaker => ({...breaker, transformer, tIndex}))
+        const allBreakersWithTransformer = transformers.flatMap((transformer, tIndex) =>
+            transformer.breakers.map(breaker => ({ ...breaker, transformer, tIndex }))
         );
 
-        type BreakerWithTransformer = Breaker & { transformer: Transformer; tIndex: number; };
+        type BreakerWithTransformer = typeof allBreakersWithTransformer[0];
         const part1Meters = new Map<string, { breaker: BreakerWithTransformer, meter: IndividualMeter }>();
 
-        // First pass: find all "Part 1" meters
+        // First pass: find all "Part 1" meters for quick lookup
         allBreakersWithTransformer.forEach(breaker => {
             breaker.meters.forEach(meter => {
                 if (meter.note === 'جزء 1') {
@@ -84,48 +85,66 @@ const useDisplayData = (transformers: Transformer[]): DisplayRow[] => {
                 }
             });
         });
-        
-        const handledMeterPartIds = new Set<string>();
 
-        // Second pass: find "Part 2" meters, create merged rows
-        allBreakersWithTransformer.forEach(breaker => {
-            breaker.meters.forEach(meter => {
-                if (meter.note === 'جزء 2') {
-                    const baseId = (meter.id as string).replace('_p2', '');
-                    if (part1Meters.has(baseId)) {
-                        const { breaker: breaker1, meter: meter1 } = part1Meters.get(baseId)!;
-                        
-                        handledMeterPartIds.add(meter1.id as string);
-                        handledMeterPartIds.add(meter.id as string);
+        // Second pass: Find pairs, create merged rows, and mark breakers as handled
+        allBreakersWithTransformer.forEach(breaker2 => {
+            const breaker2Key = `t${breaker2.transformer.id}-b${breaker2.id}`;
+            if (handledBreakers.has(breaker2Key)) {
+                return; // Already processed as part of a pair
+            }
 
-                        const totalLoad = meter1.cdl + meter.cdl;
-                        const originalMeter = { ...meter1, id: baseId, cdl: totalLoad, note: undefined };
+            // Look for a "part 2" meter to initiate a merge
+            const part2Meter = breaker2.meters.find(m => m.note === 'جزء 2');
+            if (part2Meter) {
+                const baseId = (part2Meter.id as string).replace('_p2', '');
+                if (part1Meters.has(baseId)) {
+                    const { breaker: breaker1, meter: meter1 } = part1Meters.get(baseId)!;
+                    
+                    // Found a pair. Create one combined entry for breaker1 and breaker2.
+                    const breaker1Key = `t${breaker1.transformer.id}-b${breaker1.id}`;
+                    handledBreakers.add(breaker1Key);
+                    handledBreakers.add(breaker2Key);
 
-                        processedRows.push({
-                            isMerged: true,
-                            id: baseId,
-                            transformer: breaker.transformer,
-                            tIndex: breaker.tIndex,
-                            number: `${breaker1.number} & ${breaker.number}`,
-                            categories: Array.from(new Set([...breaker1.categories, ...breaker.categories])),
-                            meters: [originalMeter],
-                            load: totalLoad,
-                            utilizationPercent: (totalLoad / 620) * 100, // Calculate utilization against 620A target for dual breakers
-                        });
-                        part1Meters.delete(baseId);
-                    }
+                    // Re-create the original meter that was split
+                    const originalMeter = { ...meter1, id: baseId, cdl: meter1.cdl + part2Meter.cdl, note: undefined };
+                    
+                    // Combine all other meters from both breakers
+                    const allMetersInPair = [
+                        originalMeter,
+                        ...breaker1.meters.filter(m => m.id !== meter1.id),
+                        ...breaker2.meters.filter(m => m.id !== part2Meter.id)
+                    ];
+
+                    const combinedLoad = breaker1.load + breaker2.load;
+                    // For merged view, utilization is against the capacity of two breakers
+                    const utilizationPercent = (combinedLoad / 620) * 100; // Keep 620 for consistency with original logic
+
+                    processedRows.push({
+                        isMerged: true,
+                        id: baseId,
+                        transformer: breaker1.transformer,
+                        tIndex: breaker1.tIndex,
+                        number: `${breaker1.number} & ${breaker2.number}`,
+                        categories: new Set([...breaker1.categories, ...breaker2.categories]),
+                        meters: allMetersInPair,
+                        load: combinedLoad,
+                        utilizationPercent: utilizationPercent,
+                    });
                 }
-            });
+            }
         });
 
-        // Third pass: add regular breakers with their remaining meters
+        // Third pass: Add all un-merged breakers that have meters
         allBreakersWithTransformer.forEach(breaker => {
-            const remainingMeters = breaker.meters.filter(m => !handledMeterPartIds.has(m.id as string));
-            if (remainingMeters.length > 0) {
+            const breakerKey = `t${breaker.transformer.id}-b${breaker.id}`;
+            if (handledBreakers.has(breakerKey)) {
+                return; // Skip breakers that were part of a merge
+            }
+
+            if (breaker.meters.length > 0) {
                 processedRows.push({
-                    ...breaker,
+                    ...breaker, // Contains all necessary fields
                     isMerged: false,
-                    meters: remainingMeters,
                 });
             }
         });
@@ -146,11 +165,11 @@ const useDisplayData = (transformers: Transformer[]): DisplayRow[] => {
 
 
             return {
-                id: row.isMerged ? row.id as string : `${row.tIndex}-${row.id}`,
+                id: row.isMerged ? row.id as string : `t${row.tIndex}-b${row.id}`,
                 isMerged: row.isMerged,
                 transformerInfo: `المحول ${row.tIndex + 1} (${row.transformer.type.name})`,
                 breakerNumber: String(row.number),
-                categories: Array.isArray(row.categories) ? row.categories.join(', ') : Array.from(row.categories).join(', '),
+                categories: Array.from(row.categories).join(', '),
                 meterCount: row.meters.length,
                 load: row.load.toFixed(1),
                 utilization: util.toFixed(1),
@@ -342,12 +361,12 @@ const SummaryGrid: React.FC<{summary: DistributionSummary}> = ({ summary }) => {
     )
 }
 
-const useProcessedPanelData = (transformer: Transformer): PanelSlot[] => {
+const useProcessedBreakers = (transformer: Transformer): BreakerSlot[] => {
     return useMemo(() => {
-        const slots: PanelSlot[] = [];
+        const slots: BreakerSlot[] = [];
         const activeBreakers = transformer.breakers.filter(b => b.meters.length > 0);
         if (activeBreakers.length === 0) {
-             return Array.from({ length: transformer.type.breakers }, (_, i) => ({ type: 'empty', number: i + 1 }));
+             return [];
         }
 
         const part1Meters = new Map<string, { breaker: Breaker, meter: IndividualMeter }>();
@@ -384,6 +403,7 @@ const useProcessedPanelData = (transformer: Transformer): PanelSlot[] => {
                             categories: new Set([...breaker1.categories, ...breaker.categories]),
                             meterTypes: new Set([...breaker1.meterTypes, ...breaker.meterTypes]),
                             timePatterns: new Set([...breaker1.timePatterns, ...breaker.timePatterns]),
+                            isMerged: true,
                         });
                     }
                 }
@@ -404,13 +424,16 @@ const useProcessedPanelData = (transformer: Transformer): PanelSlot[] => {
         for (let i = 1; i <= transformer.type.breakers; i++) {
             if (activeBreakerMap.has(i)) {
                 const data = activeBreakerMap.get(i)!;
-                if ('isMerged' in data || !String(data.number).includes('&')) {
-                     slots.push({ type: 'active', data: data as Breaker });
+                // FIX: The previous type guard was not reliably narrowing the type.
+                // Using a unique discriminant property 'isMerged' on MergedBreakerData resolves this ambiguity
+                // and allows TypeScript to correctly infer the type in each branch.
+                if (!('isMerged' in data)) {
+                    // data is now correctly inferred as Breaker
+                    slots.push({ type: 'active', data: data });
                 } else {
-                     slots.push({ type: 'merged', data: data as MergedBreakerData });
+                    // data is now correctly inferred as MergedBreakerData
+                    slots.push({ type: 'merged', data: data });
                 }
-            } else if (!mergedBreakerNumbers.has(i)) {
-                 slots.push({ type: 'empty', number: i });
             }
         }
         return slots;
@@ -428,10 +451,10 @@ const TransformerCard: React.FC<{transformer: Transformer}> = ({ transformer }) 
         ? 'border-red-500 bg-red-50' 
         : 'border-sky-500 bg-sky-50';
 
-    const panelSlots = useProcessedPanelData(transformer);
+    const breakerSlots = useProcessedBreakers(transformer);
     const midPoint = Math.ceil(transformer.type.breakers / 2);
-    const leftColumn = panelSlots.filter(s => (s.type === 'empty' ? s.number : parseInt(String(s.data.number).split('&')[0])) <= midPoint);
-    const rightColumn = panelSlots.filter(s => (s.type === 'empty' ? s.number : parseInt(String(s.data.number).split('&')[0])) > midPoint);
+    const leftColumn = breakerSlots.filter(s => parseInt(String(s.data.number).split('&')[0]) <= midPoint);
+    const rightColumn = breakerSlots.filter(s => parseInt(String(s.data.number).split('&')[0]) > midPoint);
 
 
     return (
@@ -453,25 +476,23 @@ const TransformerCard: React.FC<{transformer: Transformer}> = ({ transformer }) 
                 </div>
                  {isOver80 && !transformer.isDedicated && <span className="text-xs font-bold bg-red-500 text-white py-1 px-2 rounded-full">يتجاوز 80%</span>}
             </div>
-            {transformer.isDedicated ? (
+            {breakerSlots.length === 0 ? (
+                <div className="text-center text-slate-500 py-4">لا توجد قواطع مستخدمة في هذا المحول.</div>
+            ) : transformer.isDedicated ? (
                 <div className="mt-4">
-                     {panelSlots.map(slot => 
-                        slot.type === 'active' || slot.type === 'merged' ? <BreakerCard key={slot.data.id} breaker={slot.data} /> : null
+                     {breakerSlots.map(slot => 
+                        <BreakerCard key={slot.data.id} breaker={slot.data} />
                     )}
                 </div>
             ) : (
                 <div className="grid grid-cols-2 gap-x-4 gap-y-2">
                     <div className="space-y-2">
                         {leftColumn.map(slot => 
-                            slot.type === 'empty' ? <EmptyBreakerSlot key={slot.number} number={slot.number} /> :
-                            slot.type === 'merged' ? <BreakerCard key={slot.data.id} breaker={slot.data} isMerged /> :
                             <BreakerCard key={slot.data.id} breaker={slot.data} />
                         )}
                     </div>
                      <div className="space-y-2">
                         {rightColumn.map(slot => 
-                            slot.type === 'empty' ? <EmptyBreakerSlot key={slot.number} number={slot.number} /> :
-                            slot.type === 'merged' ? <BreakerCard key={slot.data.id} breaker={slot.data} isMerged /> :
                             <BreakerCard key={slot.data.id} breaker={slot.data} />
                         )}
                     </div>
@@ -481,15 +502,7 @@ const TransformerCard: React.FC<{transformer: Transformer}> = ({ transformer }) 
     )
 }
 
-const EmptyBreakerSlot: React.FC<{number: number}> = ({ number }) => (
-    <div className="p-3 rounded-lg border border-slate-300 bg-slate-100 text-slate-500 text-center">
-         <h4 className="font-bold">⚡ القاطع {number}</h4>
-         <p className="text-sm mt-1">-- فارغ --</p>
-    </div>
-);
-
-
-const BreakerCard: React.FC<{breaker: Breaker | MergedBreakerData, isMerged?: boolean}> = ({ breaker, isMerged }) => {
+const BreakerCard: React.FC<{breaker: Breaker | MergedBreakerData}> = ({ breaker }) => {
     const util = breaker.utilizationPercent;
     const isDedicated = 'dedicated' in breaker && breaker.dedicated;
 

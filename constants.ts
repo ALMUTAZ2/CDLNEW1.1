@@ -1,7 +1,8 @@
 
 import { TransformerType } from './types';
 
-export const MAX_BREAKER_CAPACITY = 248;
+export const MAX_BREAKER_CAPACITY = 310;
+export const MAX_BREAKER_SAFE_CAPACITY = MAX_BREAKER_CAPACITY * 0.8; // 248A
 export const TARGET_UTILIZATION = 75;
 
 export const TRANSFORMER_TYPES: TransformerType[] = [
