@@ -1,5 +1,6 @@
 import React, { useMemo } from 'react';
 import { DistributionResults, Transformer, Breaker, IndividualMeter, DistributionSummary } from '../types';
+import FinalConnectionsSection from './FinalConnectionsSection';
 
 interface ResultsSectionProps {
     results: DistributionResults;
@@ -190,7 +191,7 @@ const useDisplayData = (transformers: Transformer[]): DisplayRow[] => {
 
 const ResultsSection: React.FC<ResultsSectionProps> = ({ results }) => {
     
-    const { summary, transformers } = results;
+    const { summary, transformers, finalConnections } = results;
     const displayData = useDisplayData(transformers);
 
     const rowsWithSpanInfo = useMemo((): RowWithSpanInfo[] => {
@@ -245,7 +246,7 @@ const ResultsSection: React.FC<ResultsSectionProps> = ({ results }) => {
         const printWindow = window.open('', '_blank');
         if (!printWindow) return;
 
-        const tableHtml = `
+        const mainTableHtml = `
             <table style="width: 100%; border-collapse: collapse; margin-top: 20px; font-size: 12px;">
                 <thead style="text-align: center;">
                     <tr>
@@ -278,13 +279,52 @@ const ResultsSection: React.FC<ResultsSectionProps> = ({ results }) => {
             </table>
         `;
 
+        const connectionsTableHtml = finalConnections && finalConnections.length > 0 ? `
+            <h2>جدول توصيلات شبكة الجهد المنخفض</h2>
+            <table style="width: 100%; border-collapse: collapse; margin-top: 20px; font-size: 12px;">
+                 <thead style="text-align: center;">
+                    <tr>
+                        <th style="border: 1px solid #ddd; padding: 6px; background-color: #f2f2f2;">نقطة التوصيل</th>
+                        <th style="border: 1px solid #ddd; padding: 6px; background-color: #f2f2f2;">مصدر التغذية</th>
+                        <th style="border: 1px solid #ddd; padding: 6px; background-color: #f2f2f2;">إجمالي الحمل (CDL)</th>
+                        <th style="border: 1px solid #ddd; padding: 6px; background-color: #f2f2f2;">تكوين التوصيل</th>
+                        <th style="border: 1px solid #ddd; padding: 6px; background-color: #f2f2f2;">صناديق العدادات</th>
+                        <th style="border: 1px solid #ddd; padding: 6px; background-color: #f2f2f2;">العدادات</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${finalConnections.map(conn => {
+                        const meterDetails = conn.meters.map(m => `<div>${m.typeName} (${m.capacity}A)</div>`).join('');
+                        const configDetails = `
+                            المغذي الرئيسي: ${conn.configuration.mainFeederInfo}<br>
+                            كابل العميل: ${conn.configuration.customerCableCount}x ${conn.configuration.customerCableSize}
+                        `;
+                        const connectionPoint = conn.dpOutletNumber
+                            ? `${conn.transformerName}<br>القاطع ${conn.breakerNumber}<br>المخرج ${conn.dpOutletNumber}`
+                            : `${conn.transformerName}<br>القاطع ${conn.breakerNumber}`;
+
+                        return `
+                            <tr style="text-align: center;">
+                                <td style="border: 1px solid #ddd; padding: 6px;">${connectionPoint}</td>
+                                <td style="border: 1px solid #ddd; padding: 6px;">${conn.configuration.source}</td>
+                                <td style="border: 1px solid #ddd; padding: 6px;">${conn.totalCDL.toFixed(1)}A</td>
+                                <td style="border: 1px solid #ddd; padding: 6px; text-align: right;">${configDetails}</td>
+                                <td style="border: 1px solid #ddd; padding: 6px;">${conn.meterBoxes}</td>
+                                <td style="border: 1px solid #ddd; padding: 6px; text-align: right; font-size: 11px;">${meterDetails}</td>
+                            </tr>
+                        `
+                    }).join('')}
+                </tbody>
+            </table>
+        ` : '';
+
         const printContent = `
             <!DOCTYPE html>
             <html lang="ar" dir="rtl">
             <head>
                 <meta charset="UTF-8">
                 <title>تقرير التوزيع المتوازن</title>
-                <style> body { font-family: 'Tajawal', sans-serif; margin: 20px; } </style>
+                <style> body { font-family: 'Tajawal', sans-serif; margin: 20px; } table { page-break-inside: auto; } tr { page-break-inside: avoid; page-break-after: auto; } </style>
             </head>
             <body>
                 <h1>تقرير التوزيع المتوازن للعدادات</h1>
@@ -292,8 +332,9 @@ const ResultsSection: React.FC<ResultsSectionProps> = ({ results }) => {
                 <p>إجمالي الحمل: ${summary.totalLoad}A / ${summary.totalLoadKVA} KVA</p>
                 <p>عدد المحولات: ${summary.totalTransformers}</p>
                 <p>نقاط التوازن: ${summary.balanceScore}%</p>
-                <h2>جدول التوزيع</h2>
-                ${tableHtml}
+                <h2>جدول توزيع الأحمال على القواطع</h2>
+                ${mainTableHtml}
+                ${connectionsTableHtml}
             </body>
             </html>
         `;
@@ -315,6 +356,10 @@ const ResultsSection: React.FC<ResultsSectionProps> = ({ results }) => {
                 ))}
             </div>
             <ResultsTable rowsWithSpanInfo={rowsWithSpanInfo} />
+            
+            {finalConnections && finalConnections.length > 0 && (
+                <FinalConnectionsSection connections={finalConnections} />
+            )}
 
             <div className="mt-8 flex flex-col sm:flex-row items-center justify-center gap-4">
                 <button onClick={exportToCSV} className="w-full sm:w-auto bg-green-600 text-white font-bold py-2 px-6 rounded-lg hover:bg-green-700 transition-colors shadow-lg flex items-center justify-center gap-2">
@@ -575,6 +620,7 @@ const BreakerCard: React.FC<{breaker: Breaker | MergedBreakerData}> = ({ breaker
 const ResultsTable: React.FC<{rowsWithSpanInfo: RowWithSpanInfo[]}> = ({ rowsWithSpanInfo }) => {
     return (
         <div className="overflow-x-auto">
+            <h3 className="text-lg font-bold text-slate-800 my-4">جدول توزيع الأحمال على القواطع</h3>
             <table id="resultsTable" className="w-full text-sm text-center text-slate-600 bg-white rounded-lg shadow-md">
                 <thead className="text-xs text-slate-700 uppercase bg-slate-100">
                     <tr>

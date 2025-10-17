@@ -68,9 +68,30 @@ export interface DistributionSummary {
     transformerDetails: string;
 }
 
+export interface ConnectionConfig {
+    source: 'DP' | 'SS';
+    fuses: number;
+    customerCableCount: number;
+    customerCableSize: string;
+    mainFeederInfo: string;
+}
+
+export interface FinalConnection {
+    id: string;
+    transformerId: number;
+    transformerName: string;
+    breakerNumber: string;
+    dpOutletNumber?: string;
+    totalCDL: number;
+    meters: IndividualMeter[];
+    meterBoxes: string;
+    configuration: ConnectionConfig;
+}
+
 export interface DistributionResults {
     totalLoad: number;
     transformers: Transformer[];
     balanceScore: number;
     summary: DistributionSummary;
+    finalConnections?: FinalConnection[];
 }

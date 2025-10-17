@@ -1,6 +1,6 @@
-
 import { MeterGroup, IndividualMeter, Breaker, Transformer, TransformerType, DistributionResults, DistributionSummary } from '../types';
 import { MAX_BREAKER_CAPACITY, TRANSFORMER_TYPES, MAX_BREAKER_SAFE_CAPACITY } from '../constants';
+import { calculateFinalConnections } from './finalConnectionAlgorithm';
 
 // --- Helper Functions ---
 const updateBreakerStats = (breaker: Breaker) => {
@@ -200,8 +200,9 @@ export const performBalancedDistributionMultiTransformer = (meterGroups: MeterGr
         }
         
         // c. Distribute the selected meters precisely within the current transformer
-        const largeMeters = metersForThisTx.filter(m => m.capacity >= 400 && m.capacity < 1600);
-        const normalMeters = metersForThisTx.filter(m => m.capacity < 400);
+        const largeMeters = metersForThisTx.filter(m => m.capacity >= 400 && m.capacity < 1600); // Dual-breaker
+        const dedicated300Meters = metersForThisTx.filter(m => m.capacity === 300); // Single dedicated breaker
+        const normalMeters = metersForThisTx.filter(m => m.capacity < 300); // Normal distribution
         let unplacedMeters: IndividualMeter[] = [];
 
         // Handle large (dual-breaker) meters first
@@ -219,6 +220,19 @@ export const performBalancedDistributionMultiTransformer = (meterGroups: MeterGr
 
                 updateBreakerStats(bestPair.b1);
                 updateBreakerStats(bestPair.b2);
+            } else {
+                unplacedMeters.push(meter); // Cannot fit, return to pool
+            }
+        });
+
+        // Handle 300A meters on single dedicated breakers
+        dedicated300Meters.forEach(meter => {
+            const bestBreaker = currentTransformer.breakers.find(b => !b.dedicated && b.meters.length === 0);
+            if (bestBreaker) {
+                bestBreaker.meters.push(meter);
+                bestBreaker.dedicated = true;
+                bestBreaker.dedicatedFor = `لعداد ${meter.capacity}A`;
+                updateBreakerStats(bestBreaker);
             } else {
                 unplacedMeters.push(meter); // Cannot fit, return to pool
             }
@@ -288,11 +302,13 @@ export const performBalancedDistributionMultiTransformer = (meterGroups: MeterGr
     
     const balanceScore = calculateOverallBalanceScore(activeTransformers);
     const summary = calculateMultiTransformerSummary(activeTransformers, totalLoadAll, balanceScore, meterGroups);
+    const finalConnections = calculateFinalConnections(activeTransformers);
     
     return {
         totalLoad: totalLoadAll,
         transformers: activeTransformers,
         balanceScore,
-        summary
+        summary,
+        finalConnections
     };
 };
